@@ -179,6 +179,68 @@ frameworks are conceptually clean but do not automatically yield
 orthogonal information channels on real-system data. The gates need
 to be **learned features**, not hand-coded K-of-N votes.
 
+### Learned-feature classifiers (closes the gap)
+
+The hybrid failure showed: the three gates need to be **input features**
+to a learned classifier, not voted on. We extracted per-window scalar
+features (weighted_consensus, R, R_excess, dH_z, max_z, n_novel),
+trained logistic regression with class_weight='balanced' under 5-fold
+CV. Then iteratively expanded:
+
+| iteration | features | classifier | TPR | FAR | TTD |
+|-----------|----------|------------|-----|-----|-----|
+| Learned LR v1 | 7 single-scale | LogReg | 49% | 14% | 40 ms |
+| Multi-scale LR | 14 (50/200/500 ms × 4 + 2 derivs) | LogReg | 56% | 18% | 53 ms |
+| GBM v1 | 14 multi-scale | GBM 150 trees | 66% | 18% | 71 ms |
+| GBM v2 | 14 + dense sampling | GBM 250 trees | 72% | 18% | 71 ms |
+| GBM v3 | 24 (+ per-channel peakz) | GBM 250 trees | 72% | 21% | 71 ms |
+| **GBM v4** | **27 (+ phase indicators)** | **GBM 250 trees** | **73%** | **17%** | **78 ms** |
+
+Threshold sweeps for the GBM v4 (leak-fixed) Pareto champion:
+
+| threshold | TPR | FAR | TTD |
+|-----------|-----|-----|-----|
+| 0.60 | 83% | 62% | 95 ms |
+| 0.75 | 80% | 38% | 88 ms |
+| **0.85** | **73%** | **17%** | **78 ms** |
+| 0.90 | 65% | 13% | 71 ms |
+| 0.95 | 49% | 6% | 65 ms |
+
+### Discovered feature ranking (GBM v4)
+
+| rank | feature | importance |
+|------|---------|------------|
+| 1 | R_excess_500ms | 0.187 |
+| 2 | in_flattop | 0.184 |
+| 3 | R_500ms | 0.153 |
+| 4 | in_rampdown | 0.085 |
+| 5 | weighted_consensus_200ms | 0.065 |
+| 6 | peakz_500ms_saddle_coil_ch6 | 0.054 |
+| 7 | R_excess_200ms | 0.039 |
+| 8 | peakz_500ms_soft_xray_ch6 | 0.033 |
+
+The classifier discovered (no physics prior): (a) Kuramoto R-rise on the
+500 ms scale is the strongest single feature, (b) pulse-phase context
+(in_flattop / in_rampdown) is required to interpret it correctly, (c)
+locked-mode amplitude (saddle_coil) and soft-X-ray collapse are useful
+per-channel disambiguators.
+
+### Comparison vs Ferreira RNN baseline
+
+Ferreira 2019 reports ~85% TPR at ~15% FAR on the JET ITER-like-wall
+disruption-prediction task. Our best operating point (GBM v4 p=0.85) is
+**73% TPR at 17% FAR with 78 ms median TTD** — within 12 pp TPR at
+comparable FAR. The remaining gap likely requires machine-specific
+operational metadata (planned termination flags, gas-puff events,
+H-to-L transitions) that this dataset does not expose.
+
+### Pareto trajectory (full)
+
+Starting from the vanilla consensus 50%/25%/19ms baseline, six
+iterations brought us to 73%/17%/78ms — a +23 pp TPR / -8 pp FAR /
++59 ms TTD improvement. The iteration log + honest negative results
+are documented commit-by-commit in the repo.
+
 **Why the gap:** ELMs, mode-locking events, NBI changes, gas puffs, and
 controlled ramp-downs all produce sustained multi-channel deflections
 that look like disruption precursors to an unweighted consensus filter.
