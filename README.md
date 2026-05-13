@@ -241,6 +241,62 @@ iterations brought us to 73%/17%/78ms — a +23 pp TPR / -8 pp FAR /
 +59 ms TTD improvement. The iteration log + honest negative results
 are documented commit-by-commit in the repo.
 
+### Stability cross-validation (3 seeds)
+
+Re-running GBM v4 with seed-{42, 7, 2024} for the fold split:
+
+| threshold | TPR mean ± std | FAR mean ± std | TTD ± std (ms) |
+|-----------|----------------|----------------|----------------|
+| **p=0.85** | **74.3% ± 1.0%** | **14.1% ± 2.3%** | **80.8 ± 2.4** |
+| p=0.90 | 66.0% ± 0.8% | 7.5% ± 3.7% | 71.4 ± 1.3 |
+| p=0.95 | 49.3% ± 0.7% | 3.8% ± 1.3% | 64.2 ± 0.5 |
+
+Stability is excellent — TPR std < 1 pp across seeds — confirming the
+result is not a fold-split lottery winner.
+
+### Failure analysis findings
+
+Failure analysis on the GBM v4 misses reveals:
+- **Only 2% (8/417) of disruptions are structurally invisible** (all features
+  below 90th percentile of non-disruptive shots). The remaining 24% of
+  misses at p=0.85 are in principle discriminable, lost to threshold
+  tuning rather than absence of signal.
+- **`weighted_consensus_200ms` is the actual workhorse** with 2.5×
+  median separation (disruptive 0.677 vs non-disruptive 0.266).
+- **Kuramoto R itself is uninformative** — both classes routinely reach
+  R ~ 0.8. Only `R_excess` (over rolling baseline) discriminates.
+- **`ip`, `saddle_coil`, `soft_xray` peakz fire AFTER disruption**, not
+  before. The classifier uses them in reverse ("low ip activity → predict
+  disruption") which is fragile.
+
+### Lean v5 (negative experiment)
+
+Designed a 9-feature reduced set based on the failure analysis: dropped
+the "noisy" absolute-R and per-channel peakz features, added
+weighted_consensus *dynamics* (rate, duration_above, integral) on the
+dominant 200 ms scale. Result was *worse* than v4: lean p=0.90 gave
+48%/14%/25ms vs v4 p=0.85 74%/14%/81ms at the same FAR.
+
+The "noisy" v4 features apparently carried *contextual* information the
+GBM used effectively despite their reversed-direction averages. Stripping
+them sacrificed the model's ability to disambiguate in specific phase
+contexts. **v4 with all 27 features remains the canonical Pareto champion.**
+
+### What would close the remaining gap to Ferreira RNN
+
+Going from our 74.3%/14.1% to the published ~85%/~15% likely needs:
+
+1. **Operational metadata** — disruption-cause labels (radiation,
+   density limit, locked mode, etc.) for multi-class precursor learning
+2. **More training data** — Sharma's 500 shots vs Ferreira's ~1500 JET
+   shots
+3. **Sequence-aware architectures** — LSTM/transformer to learn precursor
+   *shapes*, not just per-window features
+
+All three are outside the scope of a single-machine, single-dataset,
+weekend-project iteration. We've extracted what's extractable from this
+data with classical features + classical ML.
+
 **Why the gap:** ELMs, mode-locking events, NBI changes, gas puffs, and
 controlled ramp-downs all produce sustained multi-channel deflections
 that look like disruption precursors to an unweighted consensus filter.
