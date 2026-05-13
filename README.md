@@ -74,28 +74,61 @@ Matches a common JET diagnostic subset:
 prad_core_frac, ip_normalised, q95, betap, li, dwmhd_dt, sxr_core,
 neutron_rate, elm_marker`
 
-## Results on synthetic data
+## Results
 
-**Clean mode** (canonical strong precursor on every disruptive shot,
-zero glitches on quiescent): TPR = 1.000, FAR = 0.000, median TTD ≈ 27 ms.
-This validates the method on the easy case — the precursor pattern is
-detected reliably and the no-alert quiescent shots stay quiet.
+### Synthetic data (method validation)
 
-**Mixed mode** (precursor strength uniform in [0.4, 1.0]; 0–3 random
-glitches injected in quiescent shots): results in
-`examples/mvp_synthetic_results.json`. This is the more realistic stress
-test.
+| mode | Pareto best | TPR | FAR | TTD median |
+|------|-------------|-----|-----|------------|
+| CLEAN (canonical precursor) | frac=0.40 | 100% | 0% | 21 ms |
+| MIXED (weak precursor + glitches) | frac=0.25 | 88% | 0% | 21 ms |
 
-## Real-data next steps
+The synthetic demo validates the per-channel rolling z-score + consensus
+filter detects the canonical multi-diagnostic disruption precursor
+pattern with negligible false alarm rate.
 
-1. Apply for a DisruptionPy data access via MIT-PSFC or partner.
-2. Run the same per-channel scorer on real JET shots from O3-like JPN
-   ranges; calibrate thresholds against the empirical FAR rate.
-3. Head-to-head benchmark against the published Ferreira RNN
-   (`diogoff/plasma-disruptions`) on a 50-100 shot cross-validation set.
-4. Document interpretability advantage: per-channel breakdown of alerts
-   that the RNN cannot produce.
+### Real MAST data (benchmark vs reality)
+
+Dataset: Sharma 2025, "MAST disruption detection dataset" (Zenodo
+[16032053](https://doi.org/10.5281/zenodo.16032053)).
+500 MAST shots, 10 diagnostic channels, 4638 Hz sample rate, 429
+disruptive + 71 non-disruptive.
+
+| frac threshold | warn window | TPR | FAR | TTD median |
+|----------------|-------------|-----|-----|------------|
+| 0.40 | 200 ms | 54.8% | 52.1% | 40.4 ms |
+| 0.50 | 200 ms | 49.7% | 25.4% | 18.7 ms |
+| **0.60** | **200 ms** | **33.6%** | **11.3%** | **7.8 ms** |
+
+**Honest read:** the vanilla unweighted consensus catcher with default
+channel selection is *not competitive* with published RNN benchmarks
+(Ferreira 2019: ~85% TPR at ~15% FAR on JET; published MAST RNN baselines
+similar). The gap is real and reflects the inherent difficulty of
+generalising a parameter-free consensus to the actual noise structure
+of plasma diagnostics.
+
+**Why the gap:** ELMs, mode-locking events, NBI changes, gas puffs, and
+controlled ramp-downs all produce sustained multi-channel deflections
+that look like disruption precursors to an unweighted consensus filter.
+The synthetic-data success comes from an artificially clean precursor
+model that does not reproduce the diagnostic-by-diagnostic variability
+of real plasmas.
+
+### Paths forward (where the real research goes)
+
+1. **Per-channel weighting** — learn from labelled disruptions which
+   diagnostics are most predictive; downweight noisy channels.
+2. **Channel-specific z-thresholds** — locked-mode growth has different
+   dynamics than P_rad spikes; one global z=3.0 is too crude.
+3. **Multi-scale analysis** — some precursors are <10 ms (fast MHD),
+   some are >100 ms (slow density decay). Apply the catcher at several
+   baseline/assess scales and combine.
+4. **Pulse-phase awareness** — ramp-up, flat-top, ramp-down each have
+   different baseline statistics; conditional thresholds per phase.
+5. **Head-to-head with a published baseline** on the same MAST 500-shot
+   set (Ferreira RNN, etc.) once a real-data pipeline is wired up.
 
 ## License
 
-MIT. No real JET data redistribution involved.
+MIT. Real MAST data NOT redistributed — fetched on demand from Zenodo
+DOI 10.5281/zenodo.16032053 (CC-BY 4.0).

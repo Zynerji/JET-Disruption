@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+data/T_lead_0ms/
+data/*.tar.xz
