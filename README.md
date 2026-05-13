@@ -107,6 +107,43 @@ similar). The gap is real and reflects the inherent difficulty of
 generalising a parameter-free consensus to the actual noise structure
 of plasma diagnostics.
 
+### Per-channel weighting (5-fold CV)
+
+`examples/benchmark_mast_weighted.py` learns a per-channel weight via
+log-likelihood ratio of firing in precursor vs quiescent windows, using
+5-fold cross-validation. The weighted consensus uses
+`sum_c w_c * is_novel_c(t) / sum_c w_c` instead of plain fraction.
+
+| frac | unweighted (TPR/FAR) | weighted (TPR/FAR) | lift |
+|------|----------------------|--------------------|------|
+| 0.20 | 43% / 93% | 47% / 89% | +4 TPR / -4 FAR |
+| **0.30** | **52% / 85%** | **65% / 77%** | **+12 TPR / -7 FAR** |
+| 0.40 | 55% / 52% | 65% / 51% | +10 TPR / -1 FAR |
+| 0.50 | 50% / 25% | 45% / 20% | -5 TPR / -6 FAR |
+
+Learned weights (across folds), sorted:
+
+| Rank | Channel | Mean weight |
+|------|---------|------------|
+| 1 | `ip` (plasma current) | 1.39 |
+| 2 | `soft_xray_ch6` | 0.76 |
+| 3 | `power_radiated` | 0.64 |
+| 4 | `saddle_coil_ch6` (locked mode) | 0.60 |
+| 5 | `li` (internal inductance) | 0.57 |
+| 6 | `vloop_dynamic` | 0.49 |
+| 7-8 | `dalpha` HM10/HU10 | 0.45/0.38 |
+| 9-10 | `n_e_core` / `t_e_core` | 0.34 / 0.34 |
+
+This ranking matches plasma-physics intuition: ip (current quench) is
+the strongest disruption indicator; soft-X-ray collapse, locked-mode
+amplitude, and radiated-power spike are textbook precursors. The
+weighting algorithm discovers this from labels alone, no physics prior.
+
+**Weighting moves the needle but does not close the gap.** Best
+weighted-consensus Pareto is still ~65% TPR / 51% FAR or 45% TPR / 20% FAR —
+roughly half the gap to published RNN benchmarks closed by weighting
+alone.
+
 **Why the gap:** ELMs, mode-locking events, NBI changes, gas puffs, and
 controlled ramp-downs all produce sustained multi-channel deflections
 that look like disruption precursors to an unweighted consensus filter.
