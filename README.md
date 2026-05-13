@@ -144,6 +144,41 @@ weighted-consensus Pareto is still ~65% TPR / 51% FAR or 45% TPR / 20% FAR —
 roughly half the gap to published RNN benchmarks closed by weighting
 alone.
 
+### Hybrid A+B+C gate (pendulum/Kuramoto/Hamiltonian)
+
+`src/jet_disruption/hybrid_gate.py` combines three orthogonal-in-principle
+gates inspired by coupled-oscillator structure:
+
+- **Gate A** — coherence-of-derivative: each channel's `|z| > 3` AND
+  `sign(dz/dt)` matches the majority of other above-threshold channels.
+- **Gate B** — Kuramoto R: analytic-phase synchronisation across
+  channels via Hilbert transform; alert on R rising above rolling baseline.
+- **Gate C** — diagnostic Hamiltonian: H(t) = Σ w_c z_c²; alert on
+  |dH/dt| z-scored against trailing baseline exceeding threshold.
+
+Combined via K-of-3 voting on the binary gate activations.
+
+5-fold CV on MAST 500 shots (same setup as weighted baseline):
+
+| Config | TPR | FAR | TTD median |
+|--------|-----|-----|-----------|
+| weighted, frac=0.50 | 45% | 20% | 12 ms |
+| **hybrid K=2** | **45%** | **32%** | **16 ms** |
+| **hybrid K=3** | **11%** | **3%** | **6 ms** |
+
+**Negative result.** Hybrid K=2 is *worse* than weighted-only at the same
+TPR (FAR up 12 pp). The three gates are not as independent as the
+pendulum framing predicted — on real plasma data, ELMs, mode-locking
+events, and controlled ramp-downs produce coordinated multi-channel
+motion that all three gates detect identically. K=3 carves out a useful
+"high-precision corner" (47 TP, 2 FP, precision 96%) but TPR=11%
+makes it a niche tool, not a primary detector.
+
+Lesson: methodology imports from coupled-oscillator/Hamiltonian
+frameworks are conceptually clean but do not automatically yield
+orthogonal information channels on real-system data. The gates need
+to be **learned features**, not hand-coded K-of-N votes.
+
 **Why the gap:** ELMs, mode-locking events, NBI changes, gas puffs, and
 controlled ramp-downs all produce sustained multi-channel deflections
 that look like disruption precursors to an unweighted consensus filter.
