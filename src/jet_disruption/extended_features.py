@@ -64,3 +64,39 @@ def compute_extended_features(diag: np.ndarray, dt: float,
     out = np.concatenate([multi, per_ch], axis=1)
     feat_names = tuple(MULTISCALE_FEATURE_NAMES) + per_channel_feature_names(channel_names)
     return out.astype(np.float32), feat_names
+
+
+def compute_phase_aware_features(diag: np.ndarray, dt: float,
+                                   weights: np.ndarray,
+                                   channel_names: tuple,
+                                   time_s: np.ndarray,
+                                   ramp_up_tmax: float | None,
+                                   flat_top_tmin: float | None,
+                                   flat_top_tmax: float | None,
+                                   scales_ms: tuple = (50.0, 200.0, 500.0)
+                                   ) -> tuple[np.ndarray, tuple]:
+    """Extended features + 3 pulse-phase indicators (one-hot).
+
+    in_rampup:    1 if t < ramp_up_tmax
+    in_flattop:   1 if ramp_up_tmax <= t <= flat_top_tmax
+    in_rampdown:  1 if t > flat_top_tmax
+
+    NaN-handling: if a boundary is NaN, that indicator is always 0.
+    """
+    import math
+    base, base_names = compute_extended_features(
+        diag, dt, weights, channel_names, scales_ms=scales_ms,
+    )
+    T = len(time_s)
+    in_rampup = np.zeros(T, dtype=np.float32)
+    in_flattop = np.zeros(T, dtype=np.float32)
+    in_rampdown = np.zeros(T, dtype=np.float32)
+    if (ramp_up_tmax is not None and not math.isnan(ramp_up_tmax)
+            and flat_top_tmax is not None and not math.isnan(flat_top_tmax)):
+        in_rampup[time_s < ramp_up_tmax] = 1.0
+        in_flattop[(time_s >= ramp_up_tmax) & (time_s <= flat_top_tmax)] = 1.0
+        in_rampdown[time_s > flat_top_tmax] = 1.0
+    phase_cols = np.stack([in_rampup, in_flattop, in_rampdown], axis=1)
+    out = np.concatenate([base, phase_cols], axis=1)
+    feat_names = base_names + ("in_rampup", "in_flattop", "in_rampdown")
+    return out.astype(np.float32), feat_names
