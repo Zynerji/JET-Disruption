@@ -1,0 +1,562 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{bm}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+\title{\Large\textbf{Cross-diagnostic consensus for tokamak disruption prediction}\\
+\large{A ten-iteration honest-iteration log from address-space novelty
+catcher to gradient-boosted multi-scale classifier on the 500-shot MAST
+dataset, with stability cross-validation and failure analysis}}
+
+\author{Christian Knopp \\
+  \texttt{cknopp@gmail.com} \\
+  \href{https://github.com/Zynerji/JET-Disruption}{\texttt{github.com/Zynerji/JET-Disruption}}}
+
+\date{2026-05-13}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We document a ten-iteration honest-engineering record of porting a
+cross-diagnostic consensus catcher --- originally developed for
+unmodeled gravitational-wave burst search and for cross-observable
+geometric-locus identification in spacetime metrics --- to the problem
+of tokamak disruption prediction on the public 500-shot MAST dataset
+(Sharma 2025, Zenodo \texttt{10.5281/zenodo.16032053}). The pipeline
+operates on the same robust rolling z-score + multi-detector consensus
+structure used by the Systroph\=e v2 detector triple: per-channel
+novelty scoring with median-and-MAD baseline, followed by an alert rule
+that requires a fraction-threshold of channels to co-fire simultaneously
+for a minimum sustain. We iterate the pipeline through nine design
+variations, document two outright negative results (hybrid
+pendulum/Kuramoto/Hamiltonian voting; failure-analysis-informed lean
+feature set), and converge on a 27-feature gradient-boosting classifier
+that achieves \textbf{74.3 $\pm$ 1.0\% TPR at 14.1 $\pm$ 2.3\% FAR with
+80.8 $\pm$ 2.4 ms median time-to-disruption} (mean $\pm$ std across
+three 5-fold cross-validation seeds). The result matches published
+recurrent-neural-network baselines on FAR while remaining $\sim$11 pp
+below them on TPR. We give an explicit failure analysis showing that
+only 2\% of disruptions are structurally invisible to our feature set,
+identify the remaining 24\% miss budget as a threshold-tuning gap rather
+than a missing-information gap, and discuss why the remaining
+performance gap to RNN baselines likely requires per-shot operational
+metadata (disruption-cause classification) that this dataset does not
+expose. All code, all checkpoints, and all per-iteration JSON results
+are publicly available; the iteration log is reproducible commit-by-commit.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+A tokamak \emph{disruption} is the sudden uncontrolled termination of a
+magnetic confinement plasma: stored magnetic energy that took seconds
+to build up is released within $\sim$10\,ms, depositing localized
+megajoule heat loads onto the wall and inducing eddy-current forces on
+the vessel structure. On ITER and on future fusion reactors, the
+engineering cost of an unmitigated disruption is sufficient that
+operations cannot proceed without a reliable forward-prediction system
+that triggers mitigation hardware (massive-gas-injection valves,
+shattered-pellet injectors) with adequate lead time, typically 30--50\,ms
+\cite{vega2013,maraschek2018}. The standard performance figure is true-positive
+rate (TPR, fraction of real disruptions caught at $\ge 30$ ms lead)
+versus false-alarm rate (FAR, fraction of non-disruptive shots
+triggering a spurious alert).
+
+The published state of the art on real plasma data is
+recurrent-neural-network ensembles. Ferreira et al.\ (2019)
+\cite{ferreira2019} report a Long Short-Term Memory architecture on JET
+bolometer data yielding approximately 85\% TPR at 15\% FAR. The TPR/FAR
+trade-off is a free design parameter (set by the binary threshold on
+the LSTM output) and the operating curve is dataset-dependent.
+
+We are interested in a methodologically distinct approach: applying the
+\emph{cross-observable consensus catcher} originally developed for
+unmodeled-burst search in gravitational-wave data
+\cite{systrophe_gw} and for cross-observable identification of metric
+special loci in spacetime physics \cite{systrophe_lp_ridge} to the
+tokamak disruption problem. The structural argument is that a
+disruption is a regime in which many independent plasma observables
+(magnetic, kinetic, radiative) deflect from their baseline
+simultaneously; this is exactly the cross-observable consensus
+signature the catcher is designed to detect. The empirical question is
+whether the methodology, applied without machine-specific tuning or
+operational metadata, can reach performance comparable to published RNN
+baselines.
+
+This paper records a ten-iteration log of that effort. Of the ten
+iterations, eight produced measurable forward progress and two produced
+informative negative results that constrained subsequent feature design.
+The final operating point matches published RNN FAR at $\sim$11 pp
+lower TPR; we identify the remaining gap explicitly.
+
+\section{Method}\label{sec:method}
+
+\subsection{The catcher v2 detector triple}\label{ssec:catcher}
+
+Given a $C$-channel diagnostic time series sampled at rate $f_s$, the
+catcher v2 operates as follows.
+
+\paragraph{Per-channel novelty score.} For each channel $c$ and each
+sample $t$, the catcher computes a robust z-score of the assessment
+window against a trailing baseline:
+\[
+z_c(t) \;=\; \frac{\mathrm{median}\bigl(x_c[t-A : t]\bigr) - \mathrm{median}\bigl(x_c[t-B : t-A]\bigr)}
+                  {1.4826 \cdot \mathrm{MAD}\bigl(x_c[t-B : t-A]\bigr) + \epsilon}
+\]
+with assessment-window length $A$ (we use 5\,ms) and baseline-window
+length $B$ (we use 50, 200, and 500\,ms at three scales). A channel is
+flagged as novel at $t$ if $|z_c(t)| > z_{\mathrm{thr}}$ (we use 3.0).
+The median-and-MAD form is robust to channel-specific outlier
+distributions and requires no prior calibration.
+
+\paragraph{Consensus alert.} At each $t$, the catcher computes the
+fraction of channels novel:
+\[
+f(t) \;=\; \frac{1}{C} \sum_{c=1}^{C} \mathbb{1}\bigl[|z_c(t)| > z_{\mathrm{thr}}\bigr].
+\]
+An alert fires when $f(t) \ge f_{\mathrm{thr}}$ sustained for at least
+$\tau_{\mathrm{min}}$ samples. The fraction threshold $f_{\mathrm{thr}}$
+is the principal tunable parameter.
+
+\subsection{Per-channel weighting}\label{ssec:weighting}
+
+Vanilla consensus weights every channel equally. We learn per-channel
+log-likelihood-ratio weights from labelled training shots:
+\[
+w_c \;=\; \log \frac{P\bigl(|z_c| > z_{\mathrm{thr}} \mid \text{precursor}\bigr) + \alpha}
+                    {P\bigl(|z_c| > z_{\mathrm{thr}} \mid \text{quiescent}\bigr) + \alpha},
+\]
+with Laplace smoothing $\alpha = 1$ over the binary-event counts. We
+clamp $w_c \ge 0$: a channel that fires more in quiescence than in
+precursor adds noise rather than signal. The weighted consensus then
+replaces $f(t)$:
+\[
+f_w(t) \;=\; \frac{\sum_c w_c \, \mathbb{1}\bigl[|z_c(t)| > z_{\mathrm{thr}}\bigr]}{\sum_c w_c}.
+\]
+The weights are learned on training-fold shots only; the test fold
+sees only the inferred weights.
+
+\subsection{Multi-scale features}\label{ssec:multiscale}
+
+A single baseline window cannot capture both fast (locked-mode MHD) and
+slow (radiation collapse, density limit) precursors. We compute the
+per-channel z-score at three scales $B \in \{50, 200, 500\}$ ms, then
+derive the following per-time-step features:
+\[
+\bigl\{f_w(t), R(t), R_{\mathrm{excess}}(t), n_{\mathrm{novel}}(t)\bigr\} \times 3 \text{ scales},
+\]
+plus two time-derivatives ($\dot{f_w}$ and $\dot{R}_{\mathrm{excess}}$
+at the 200 ms scale), for 14 features. Here $R(t)$ is the Kuramoto
+order parameter computed from the analytic phases of the channel
+z-scores (Hilbert transform), and $R_{\mathrm{excess}}$ is $R(t)$ minus
+its trailing rolling median (window 300--600 samples depending on the
+scale).
+
+\subsection{Per-channel peak features}\label{ssec:peakz}
+
+We add ten further features: $\max |z_c|$ within a trailing 500 ms
+window per channel. This gives the classifier discrimination by
+\emph{which} channels are most active, not just how many channels co-fire.
+
+\subsection{Pulse-phase indicators}\label{ssec:phase}
+
+Three binary indicators encode the pulse phase from the
+ramp-up/flat-top/ramp-down boundaries in the dataset metadata. These let
+the classifier learn phase-conditional thresholds (e.g.\ ``ignore
+Kuramoto rise during controlled ramp-down''). Crucially, the training
+sampler must include non-disruptive ramp-down windows as negatives to
+avoid the phase indicator becoming a label proxy; we document this
+explicit fix in \S\ref{ssec:leakage}.
+
+\subsection{Classifier}\label{ssec:classifier}
+
+We use the scikit-learn \texttt{GradientBoostingClassifier} with 250
+trees, max-depth 5, learning rate 0.05, subsample 0.7, minimum samples
+per leaf 10. Class imbalance ($\sim$71/429 in our windowed sample after
+dense extraction) is handled by per-sample weights inversely proportional
+to class frequency. The classifier's per-window posterior $P(t)$ feeds
+into a final alert rule: $P(t) \ge p_{\mathrm{thr}}$ sustained for
+$\tau_{\mathrm{min}}$ samples.
+
+\subsection{Alert masking}\label{ssec:masking}
+
+To avoid alerts firing on plasma ramp-up artefacts or on legitimate
+controlled ramp-downs, we restrict the alert evaluation window to
+\[
+\bigl[t_{\mathrm{flat\_top\_min}} + 50\text{ ms},\; \min(t_{\mathrm{disrupt}},\; t_{\mathrm{flat\_top\_max}} + 20\text{ ms})\bigr].
+\]
+This baseline-shifted lower bound ensures the rolling baseline window
+has filled with flat-top data before any novelty assessment.
+
+\section{Data}\label{sec:data}
+
+We use the MAST Disruption Detection Dataset (Sharma 2025, Zenodo
+\texttt{10.5281/zenodo.16032053}). The dataset comprises 500 NetCDF
+shot files, each containing 2000 samples at 4638 Hz spanning $\sim$0.43
+s of tokamak operation. Ten plasma diagnostics are included per shot:
+plasma current ($I_p$), total radiated power, core electron density and
+temperature, internal inductance, dynamic loop voltage, two
+$D_\alpha$ channels (HM10, HU10), saddle coil channel 6, and
+soft-X-ray channel 6. Disruption time, ramp-up boundary, and flat-top
+boundaries are provided as NetCDF attributes for the 429 disruptive
+shots; the remaining 71 shots are labelled non-disruptive.
+
+The dataset is not balanced: 429 disruptive vs 71 non-disruptive,
+roughly 6:1. We mitigate this with class-weight balancing during
+classifier training, but the relatively small non-disruptive sample is
+the principal limitation on achievable false-alarm-rate estimation.
+
+\section{Iteration log}\label{sec:iterations}
+
+\begin{table}[h]
+\centering
+\caption{Pareto trajectory across ten iterations. All numbers from 5-fold
+CV with the same shot indices. TTD = median time-to-disruption.
+Iteration 9 (\textbf{GBM v4 phase}, leak-fixed) is the canonical Pareto
+champion. Iteration 10 (lean v5) is a documented negative result.}
+\label{tab:trajectory}
+\begin{tabular}{c l rrr l}
+\toprule
+\# & Configuration & TPR (\%) & FAR (\%) & TTD (ms) & Note \\
+\midrule
+1 & Unweighted consensus (frac=0.50) & 50 & 25 & 19 & Vanilla baseline \\
+2 & Weighted (frac=0.30) & 65 & 77 & 65 & High-recall corner \\
+2 & Weighted (frac=0.50) & 50 & 25 & 12 & Equivalent to (1) \\
+3 & Hybrid K=2 of 3 (A,B,C gates) & 45 & 32 & 16 & \textbf{Negative result} \\
+3 & Hybrid K=3 of 3 & 11 & 3 & 6 & High-precision niche \\
+4 & Learned LR (7 single-scale feats) & 49 & 14 & 40 & Real gain over hybrid \\
+5 & Multi-scale LR (14 feats, 3 scales) & 56--71 & 18--32 & 53--76 & Big lift \\
+6 & GBM v1 (14 feats, 150 trees) & 66--81 & 18--44 & 71--102 & GBM dominates LR \\
+7 & GBM v2 (dense sampling, 250 trees) & 72--83 & 18--46 & 71--100 & +6 pp TPR at fixed FAR \\
+8 & GBM v3 (+per-channel peakz, 24 feats) & 72--82 & 21--45 & 71--100 & Plateau \\
+9 & \textbf{GBM v4 (+phase, 27 feats, leak-fixed)} & \textbf{49--73} & \textbf{6--35} & \textbf{65--88} & \textbf{Pareto champion} \\
+10 & Lean v5 (9 feats from failure analysis) & 48--75 & 14--39 & 25--39 & \textbf{Negative result} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Negative result: hybrid pendulum/Kuramoto voting}\label{ssec:hybrid}
+
+Inspired by an internal research note proposing that wave-interference
+networks obey nonlinear-pendulum dynamics with golden-ratio equilibria
+\cite{knopp_golden_pendulum}, we attempted to combine three structurally
+distinct gates into a K-of-3 voting rule:
+
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \textbf{Gate A} (coherence-of-derivative): each channel must have
+  $|z_c| > 3$ \emph{and} $\mathrm{sign}(\dot{z}_c)$ agreeing with the
+  majority of other above-threshold channels.
+\item \textbf{Gate B} (Kuramoto): the order parameter $R(t)$ exceeds its
+  rolling baseline by a configurable $\Delta R$.
+\item \textbf{Gate C} (Hamiltonian rate): $H(t) = \sum_c w_c\, z_c^2(t)$
+  has a robust-z-scored $|\dot{H}|$ exceeding threshold.
+\end{itemize}
+
+The K=2 vote rule yielded TPR 45\% at FAR 32\%, \emph{worse} than the
+weighted single-gate baseline (45/20) at the same TPR. K=3 carved out a
+high-precision niche (11/3, precision 96\%) but missed too many
+disruptions to serve as a primary detector. Section
+\ref{ssec:learned} explains why: on real plasma data the three gates
+turned out to be correlated, not independent --- they all detect
+``coordinated multi-channel motion'' with different math, and
+non-disruptive events with coordinated motion (ELMs, mode-locking,
+controlled ramp-downs) fire all three gates simultaneously.
+
+\subsection{Recovery via learned-feature classifier}\label{ssec:learned}
+
+The hybrid failure motivated using the gate scalars as
+\emph{input features} to a learned classifier rather than voting on them
+directly. The single-scale 7-feature logistic regression (iteration 4)
+recovered the loss and added a measurable gain over the weighted
+baseline: 49\% TPR at 14\% FAR with 40 ms TTD, a Pareto improvement on
+all three metrics simultaneously.
+
+The learned coefficients revealed why the K-of-3 vote failed: gate A's
+\texttt{coherence} coefficient was 0.04, gate C's \texttt{Hamiltonian}
+coefficient was 0.00, and \texttt{max\_channel\_z} was 0.00. Only
+\texttt{R\_excess} (+1.10), \texttt{R} (−1.25, negative because absolute
+R is high in both classes), \texttt{weighted\_consensus} (+1.05) and
+\texttt{n\_channels\_novel} (−0.57) carried weight. The hybrid had
+attempted to vote on signals that contained no orthogonal information.
+
+\subsection{Multi-scale lift}\label{ssec:multilift}
+
+Adding the same features at three baseline scales (50, 200, 500 ms) +
+two time-derivatives lifted the LR Pareto: TPR 71\% at FAR 32\% with 76
+ms TTD at $p_{\mathrm{thr}} = 0.85$. The 200 ms scale of
+\texttt{weighted\_consensus} dominated (LR coefficient +2.03 in the
+3-fold average), with 500 ms scales of $R$ and $R_{\mathrm{excess}}$
+contributing the next-largest coefficients. Time-derivatives carried
+essentially zero weight ($+0.05$ and $+0.01$).
+
+\subsection{Gradient boosting takes over}\label{ssec:gbm}
+
+A gradient-boosting classifier on the same 14 multi-scale features
+(iteration 6) further lifted the Pareto: TPR 81\% at FAR 44\% with 102
+ms TTD at $p_{\mathrm{thr}} = 0.85$. Dense training-window sampling
+(2 ms stride, 50 ms precursor lead, iteration 7) added another $\sim$2 pp
+TPR.
+
+\subsection{Phase indicators and a leakage fix}\label{ssec:leakage}
+
+Iteration 9 added three pulse-phase one-hot indicators
+(\texttt{in\_rampup}, \texttt{in\_flattop}, \texttt{in\_rampdown}). On
+the first attempt, the model achieved TPR 95\% at FAR 92\% --- a
+classic feature-leakage signature. The model had discovered that
+non-disruptive shots are not sampled past their flat-top end in the
+training sampler, so \texttt{in\_rampdown} effectively became a perfect
+label proxy for disruptive vs non-disruptive in the windowed sense.
+
+The fix was to extend non-disruptive shot sampling beyond the flat-top
+end through the full data range. With the leakage closed, GBM v4
+produced the canonical Pareto champion: TPR 73\% at FAR 17\% with 78 ms
+TTD at $p_{\mathrm{thr}} = 0.85$ on the seed-42 fold split.
+
+\section{Stability cross-validation}\label{sec:stability}
+
+We re-ran the GBM v4 5-fold CV with three different random seeds for
+the fold split (seeds 42, 7, 2024) to confirm the result is robust to
+which shots happen to land in which fold. Table \ref{tab:stability}
+summarises the per-seed and aggregate statistics.
+
+\begin{table}[h]
+\centering
+\caption{GBM v4 stability across three CV-fold-split seeds. All values
+in per-cent (TPR, FAR) or milliseconds (TTD). The \textbf{p=0.85}
+operating point is the canonical Pareto champion; standard deviations
+are computed across the three seeds.}
+\label{tab:stability}
+\begin{tabular}{c c c c}
+\toprule
+$p_{\mathrm{thr}}$ & TPR mean $\pm$ std & FAR mean $\pm$ std & TTD mean $\pm$ std (ms) \\
+\midrule
+0.85 & \textbf{74.3 $\pm$ 1.0} & \textbf{14.1 $\pm$ 2.3} & \textbf{80.8 $\pm$ 2.4} \\
+0.90 & 66.0 $\pm$ 0.8 & 7.5 $\pm$ 3.7 & 71.4 $\pm$ 1.3 \\
+0.95 & 49.3 $\pm$ 0.7 & 3.8 $\pm$ 1.3 & 64.2 $\pm$ 0.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TPR standard deviations are below 1 pp across seeds; TTD standard
+deviations are below 3 ms. The Pareto champion at p=0.85 is
+\textbf{74.3 $\pm$ 1.0\% TPR / 14.1 $\pm$ 2.3\% FAR / 80.8 $\pm$ 2.4 ms
+TTD}. This is not a fold-split lottery winner.
+
+\section{Failure analysis}\label{sec:failures}
+
+We characterise the 24\% of disruptions missed at the canonical
+$p_{\mathrm{thr}} = 0.85$ operating point. For each shot we compute peak
+feature values in the analysis window and compare disruptive-shot and
+non-disruptive-shot distributions.
+
+\subsection{Discriminating features}
+
+Table \ref{tab:dist} shows median and quartile statistics for the
+principal features. The result is sharp:
+
+\begin{table}[h]
+\centering
+\caption{Per-shot peak feature distributions. Disruptive-class median
+versus non-disruptive-class median. Strong discrimination means a
+$>2\times$ ratio in the same direction. \emph{Wrong-direction} features
+fire \emph{after} disruption, so the windowed pre-disruption pre-image
+shows the reverse pattern.}
+\label{tab:dist}
+\begin{tabular}{l rr l}
+\toprule
+Feature & disr.\ median & non-disr.\ median & Discrimination \\
+\midrule
+\texttt{max\_weighted\_consensus\_200ms} & 0.677 & 0.266 & strong (2.5$\times$) \\
+\texttt{max\_n\_novel\_500ms} (p75) & 4.0 & 1.0 & strong upper-tail \\
+\texttt{max\_R\_500ms} & 0.800 & 0.800 & \emph{none} \\
+\texttt{max\_R\_excess\_500ms} & 0.800 & 0.800 & \emph{none} \\
+\texttt{saddle\_coil\_peakz} & 0.000 & 0.180 & \emph{wrong direction} \\
+\texttt{soft\_xray\_peakz} & 0.000 & 0.598 & \emph{wrong direction} \\
+\texttt{ip\_peakz} & 0.000 & 0.569 & \emph{wrong direction} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The wrong-direction features are the most physically meaningful
+diagnosis. The plasma current $I_p$, the saddle-coil locked-mode
+amplitude, and the soft-X-ray emission ARE the canonical disruption
+indicators in the plasma-physics literature. However, they deflect
+\emph{at} the disruption time, not before. The pre-disruption analysis
+window ends at $t_{\mathrm{disrupt}}$, so disruptive-shot windows are
+\emph{quieter} on these channels than non-disruptive flat-top windows
+(which include normal-physics fluctuations). The classifier therefore
+uses these channels in reverse: ``$I_p$ quiet $\Rightarrow$ disruption
+imminent.'' This is a fragile signal direction and a key reason for the
+remaining gap to RNN baselines, which presumably learn a richer
+within-channel shape feature rather than a simple peak-z reduction.
+
+Equally striking: \emph{the Kuramoto order parameter $R$ itself does
+not discriminate.} Both classes routinely reach $R \approx 0.8$. Only
+the \emph{rise of $R$ over a rolling baseline} (i.e.,\ $R_{\mathrm{excess}}$)
+carries information.
+
+\subsection{Structurally invisible disruptions}
+
+Defining a disruption as ``structurally invisible'' if all its peak
+feature values lie below the 90th percentile of non-disruptive shots,
+we find $8 / 417 = 2\%$ of disruptions in this regime. The remaining
+miss budget at $p_{\mathrm{thr}} = 0.85$ is therefore a
+threshold-tuning problem, not a missing-information problem.
+
+\subsection{Negative experiment: the lean feature set}\label{ssec:lean}
+
+The failure analysis motivated a 9-feature lean redesign: drop the
+no-discrimination $R$-absolute features and the wrong-direction peakz
+features, add \texttt{weighted\_consensus} dynamics (rate of rise,
+duration above 0.3, integral over 500 ms).
+
+Result: TPR 48\% at FAR 14\% with 25 ms TTD at $p_{\mathrm{thr}} = 0.90$
+--- much worse than GBM v4 (74/14/81 at $p_{\mathrm{thr}} = 0.85$). The
+``noisy'' features the failure analysis had identified as candidates
+for removal apparently carried \emph{contextual} information the GBM
+used effectively. Stripping them sacrificed the model's ability to
+disambiguate in specific pulse-phase contexts.
+
+The lesson is that GBM feature-importance rankings are not a clean
+guide to which features can be discarded: a feature with low marginal
+importance may still be load-bearing within a specific tree split.
+Iteration 10 stands as documented evidence of this.
+
+\section{Comparison with published baselines}\label{sec:baselines}
+
+The Ferreira et al.\ 2019 \cite{ferreira2019} LSTM on JET bolometer
+data reports approximately 85\% TPR at 15\% FAR. Our final operating
+point is 74.3\% TPR at 14.1\% FAR --- approximately matching the
+RNN false-alarm-rate while running approximately 11 pp below the
+RNN's TPR.
+
+Three caveats apply to this comparison:
+
+\begin{enumerate}[leftmargin=*,itemsep=0pt]
+\item Different machine (MAST versus JET). MAST disruptions are dominated
+  by density-limit and radiation-collapse precursors; JET disruptions
+  also include locked-mode and tearing-mode causes. Per-machine
+  precursor distributions differ.
+\item Different dataset size (500 versus $\sim$1500 shots in Ferreira's
+  evaluation set).
+\item Different baseline pipelines. Ferreira uses raw bolometer profiles
+  fed to an LSTM, learning temporal shape implicitly; we use hand-crafted
+  scalar features and gradient boosting, with all temporal structure
+  collapsed to peak/rate/integral summaries.
+\end{enumerate}
+
+Closing the remaining 11 pp TPR gap most likely requires one or more of:
+
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \textbf{Operational metadata for multi-class precursor learning.}
+  Disruption-cause labels (radiation, density limit, locked mode,
+  H/L back-transition, $\ldots$) would let a multi-class model learn
+  cause-specific precursor signatures rather than a single
+  binary-disruption signature. The current MAST dataset does not
+  expose these labels.
+\item \textbf{Larger training set.} 429 disruptive shots is small for
+  the diversity of physics involved.
+\item \textbf{Sequence-aware architectures.} An LSTM or transformer
+  could learn within-channel \emph{shape} features that our per-window
+  scalar features collapse out. The wrong-direction peakz features
+  identified in \S\ref{sec:failures} would be unaffected because the
+  network would access the time series before disruption directly.
+\end{itemize}
+
+\section{Reproducibility}\label{sec:repro}
+
+All code, dataset URLs, per-iteration results JSON, and commit history
+are available at \url{https://github.com/Zynerji/JET-Disruption}. The
+canonical Pareto-champion result is reproducible from a clean Python
+3.12 environment with
+\texttt{pip install numpy scipy scikit-learn xarray netCDF4} and:
+
+\begin{verbatim}
+git clone https://github.com/Zynerji/JET-Disruption
+cd JET-Disruption
+python -m pip install netCDF4 xarray scikit-learn
+python -c "import urllib.request; urllib.request.urlretrieve(
+    'https://zenodo.org/api/records/16032053/files/T_lead_0ms.tar.xz/content',
+    'data/T_lead_0ms.tar.xz')"
+mkdir -p data && tar -xJf data/T_lead_0ms.tar.xz -C data
+python examples/benchmark_mast_gbm_v4.py
+python examples/stability_check_v4.py
+\end{verbatim}
+
+Each benchmark writes a results JSON next to itself. The full Pareto
+trajectory in Table~\ref{tab:trajectory} is the literal output of
+running iterations 1 through 10 in sequence.
+
+\section{Conclusion}\label{sec:conclusion}
+
+We have demonstrated that the Systroph\=e address-space cross-observable
+consensus catcher, originally developed for gravitational-wave search
+and for spacetime-metric special-locus identification, applies to
+tokamak disruption prediction on real MAST plasma data with measurable
+performance. The final operating point of 74.3 $\pm$ 1.0\% TPR at 14.1
+$\pm$ 2.3\% FAR with 80.8 $\pm$ 2.4 ms median time-to-disruption is
+within 3 pp of the published RNN false-alarm rate, $\sim$11 pp below
+the RNN true-positive rate, and is statistically stable across
+fold-split seeds.
+
+The work is documented as an ``honest iteration log'' with two outright
+negative results (hybrid voting; failure-analysis-informed feature
+reduction). The negative results were as informative as the positive
+ones: they constrained subsequent design choices and exposed a
+systematic feature-leakage failure mode in the pulse-phase indicator
+that would have invalidated naive bench-marking.
+
+The remaining gap to RNN baselines is, we argue, in operational-metadata
+access and sequence-aware shape learning rather than in the consensus
+methodology itself. The methodology generalises cleanly across
+domains --- gravitational waves, spacetime physics, plasma disruptions
+--- which we take as evidence that cross-observable consensus is a
+fundamentally good detector design for regime-change problems.
+
+\begin{thebibliography}{9}
+
+\bibitem{vega2013} Vega, J., et al.\ \emph{Results of the JET real-time disruption
+predictor in the ITER-like wall campaigns.} Fusion Eng.\ Des.\ \textbf{88},
+1228--1231 (2013).
+
+\bibitem{maraschek2018} Maraschek, M., et al.\ \emph{Path-oriented early
+reaction to approaching disruptions in ASDEX Upgrade and TCV.} Plasma
+Phys.\ Control.\ Fusion \textbf{60}, 014047 (2018).
+
+\bibitem{ferreira2019} Ferreira, D.R., Carvalho, P.J., Fernandes, H.
+\emph{Deep Learning for Plasma Tomography and Disruption Prediction
+from Bolometer Data.} IEEE Trans.\ Plasma Sci.\ \textbf{48}, 2--12 (2020).
+
+\bibitem{sharma2025} Sharma, P.\ \emph{MAST disruption detection
+dataset.} Zenodo, doi:10.5281/zenodo.16032053 (2025).
+
+\bibitem{systrophe_gw} Knopp, C.\ \emph{Systroph\=e v2 GW unmodeled-burst
+catcher: per-detector excess-sigma + coherence + band-ratio with
+2-of-3 coincidence.} Systroph\=e v0.19.2 (2026). See \texttt{src/systrophe/catcher\_v2.py}
+and \texttt{src/systrophe/gw\_pipeline\_v3.py} at
+\url{https://github.com/Zynerji/systrophe}.
+
+\bibitem{systrophe_lp_ridge} Knopp, C.\ \emph{Cross-observable consensus
+localizes the Lewis--Papapetrou chronology horizon.} Systroph\=e v0.19.2
+whitepaper, \texttt{paper/lp\_ridge\_localization.pdf} (2026).
+
+\bibitem{knopp_golden_pendulum} Knopp, C.\ \emph{The Golden Pendulum:
+Deriving Conservation Laws in Wave Interference Networks.} Internal
+draft (Jan 2026), referenced here only for the methodological hybrid-gate
+inspiration; the conservation-law claims of that draft are not
+validated by the present work.
+
+\end{thebibliography}
+
+\end{document}
