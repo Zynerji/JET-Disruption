@@ -109,8 +109,10 @@ def diagnostic_hamiltonian(per_channel: list[PerChannelScore],
         weights = np.ones(C, dtype=np.float32) / C
     w = np.asarray(weights, dtype=np.float32)
     Z = np.stack([s.z_score for s in per_channel], axis=1)  # (T, C)
-    H = (w[None, :] * (Z ** 2)).sum(axis=1)
-    return H
+    # Clip extreme z to avoid float32 overflow when post-disruption diagnostics blow up.
+    Z_clipped = np.clip(Z, -1e6, 1e6).astype(np.float64)
+    H = (w[None, :] * (Z_clipped ** 2)).sum(axis=1)
+    return H.astype(np.float32)
 
 
 def dH_dt_normalized(H: np.ndarray, baseline_window: int = 200) -> np.ndarray:
